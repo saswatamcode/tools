@@ -12,6 +12,7 @@ import (
 	"io/ioutil"
 	"os"
 	"regexp"
+	"strconv"
 
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/pkg/errors"
@@ -124,19 +125,49 @@ func WithHidden() Option {
 
 // expandEnv returns content of YAML file with substituted environment variables.
 // Follows K8s convention, i.e $(...), as mentioned here https://kubernetes.io/docs/tasks/inject-data-application/define-interdependent-environment-variables/.
+// You can also use part of env var value via syntax like $(FOO[2:4]), which will expand to 3rd and 4th character of FOO env var value.
 func expandEnv(b []byte) (r []byte, err error) {
-	var envRe = regexp.MustCompile(`\$\(([a-zA-Z_0-9]+)\)`)
+	var envRe = regexp.MustCompile(`\$\(([a-zA-Z_0-9]+)(\[(?P<Lower>\d+):(?P<Upper>\d+)])?\)`)
+	var sliceRe = regexp.MustCompile(`(\[(?P<Lower>\d+):(?P<Upper>\d+)])`)
 	r = envRe.ReplaceAllFunc(b, func(n []byte) []byte {
 		if err != nil {
 			return nil
 		}
 		n = n[2 : len(n)-1]
 
+		sliceRangeMatches := sliceRe.FindStringSubmatch(string(n))
+		var lower, upper int
+		var lerr, uerr error
+		if len(sliceRangeMatches) == 4 {
+			n = n[0 : len(n)-5]
+			lower, lerr = strconv.Atoi(sliceRangeMatches[2])
+			if lerr != nil {
+				err = errors.Wrapf(lerr, "lower range cannot be converted to int")
+				return nil
+			}
+
+			upper, uerr = strconv.Atoi(sliceRangeMatches[3])
+			if uerr != nil {
+				err = errors.Wrapf(uerr, "upper range cannot be converted to int")
+				return nil
+			}
+
+			if lower >= upper {
+				err = errors.Errorf("upper slice range must be less than lower")
+				return nil
+			}
+		}
+
 		v, ok := os.LookupEnv(string(n))
 		if !ok {
 			err = errors.Errorf("found reference to unset environment variable %q", n)
 			return nil
 		}
+
+		if lower < upper {
+			v = v[lower:upper]
+		}
+
 		return []byte(v)
 	})
 	return r, err
